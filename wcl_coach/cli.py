@@ -1,8 +1,8 @@
 """Command line interface.
 
 Examples:
-  wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890?fight=12 -p Peter
-  wcl-coach analyze AbCdEf1234567890 -p Peter --fight kills --md report.md
+  wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890?fight=12 -p <charname>
+  wcl-coach analyze AbCdEf1234567890 -p <charname> --fight kills --md report.md
   wcl-coach fights AbCdEf1234567890
 """
 from __future__ import annotations

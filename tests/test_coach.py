@@ -236,7 +236,7 @@ class FakeClient:
         self.calls.append(gql.split("(")[0].strip())
         fight = {"id": 7, "name": "Boss", "encounterID": 3009, "kill": True, "difficulty": 5,
                  "startTime": START, "endTime": START + DUR, "fightPercentage": 0}
-        actors = [{"id": 1, "name": "Peter", "server": "Antonidas"}, {"id": 2, "name": "Topdog", "server": "X"},
+        actors = [{"id": 1, "name": "player1", "server": "Antonidas"}, {"id": 2, "name": "Topdog", "server": "X"},
                   {"id": 3, "name": "Topcat", "server": "Y"}]
         if "worldData" in gql:
             return {"worldData": {"encounter": {"name": "Boss", "characterRankings": {"rankings": [
@@ -246,9 +246,9 @@ class FakeClient:
         if "playerDetails" in gql:
             return {"reportData": {"report": {
                 "playerDetails": {"data": {"playerDetails": {"dps": [
-                    {"id": 1, "name": "Peter", "type": "Mage", "specs": [{"spec": "Fire", "count": 1}]}]}}},
+                    {"id": 1, "name": "player1", "type": "Mage", "specs": [{"spec": "Fire", "count": 1}]}]}}},
                 "rDps": {"data": [{"fightID": 7, "roles": {"dps": {"characters": [
-                    {"name": "Peter", "rankPercent": 42, "amount": 1_500_000}]}}}]},
+                    {"name": "player1", "rankPercent": 42, "amount": 1_500_000}]}}}]},
                 "rHps": {"data": []},
             }}}
         if "events(" in gql:
@@ -275,7 +275,7 @@ class FakeClient:
                 "buffs": {"data": {"totalTime": DUR, "auras": []}},
                 "done": {"data": {"entries": [{"total": 4.5e8}]}},
                 "healing": {"data": {"entries": []}},
-                "deaths": {"data": {"entries": [{"id": 1, "name": "Peter", "timestamp": START + 200_000,
+                "deaths": {"data": {"entries": [{"id": 1, "name": "player1", "timestamp": START + 200_000,
                                                  "killingBlow": {"name": "Smash"}}] if mine else []}},
             }}}
         if "fights(fightIDs" in gql:
@@ -290,16 +290,16 @@ def test_end_to_end(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(cli, "_client", lambda args: FakeClient())
     out_md = tmp_path / "r.md"
     cli.main(["analyze", "https://www.warcraftlogs.com/reports/AbCdEf1234567890?fight=7",
-              "-p", "Peter", "--md", str(out_md)])
+              "-p", "player1", "--md", str(out_md)])
     out = capsys.readouterr().out
-    assert "Peter – Fire Mage" in out
+    assert "player1 – Fire Mage" in out
     assert "Parse: 42%" in out
     assert "Gestorben bei 3:20" in out
     assert "Fire Puddle" in out
     assert "Combustion" in out
     assert "Aktivität" in out
     md = out_md.read_text()
-    assert md.startswith("# Peter") and "Topdog" in md
+    assert md.startswith("# player1") and "Topdog" in md
     assert "Enchant fehlt" in out and "Stat-Verteilung" in out
 
 

@@ -36,18 +36,18 @@ Severity: **HOCH** → **MITTEL** → **NIEDRIG**, sorted by impact within each 
 
 ```bash
 # Last kill in the report
-wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890 -p Peter
+wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890 -p <charname>
 
 # Specific fight (also picked up from ?fight=12 in the URL)
-wcl-coach analyze AbCdEf1234567890 -p Peter -f 12
+wcl-coach analyze AbCdEf1234567890 -p <charname> -f 12
 
 # All pulls of one boss, or an ID range (see "Selecting fights")
-wcl-coach analyze AbCdEf1234567890 -p Peter -f sszorak
-wcl-coach analyze AbCdEf1234567890 -p Peter -f 23-41
+wcl-coach analyze AbCdEf1234567890 -p <charname> -f sszorak
+wcl-coach analyze AbCdEf1234567890 -p <charname> -f 23-41
 
 # All kills of the evening + recurring patterns + Markdown export
 # (a bare file name is saved to reports/, which is git-ignored)
-wcl-coach analyze AbCdEf1234567890 -p Peter -f kills --md raid-2026-10-17.md
+wcl-coach analyze AbCdEf1234567890 -p <charname> -f kills --md raid-2026-10-17.md
 
 # List boss pulls / check API budget
 wcl-coach fights AbCdEf1234567890
