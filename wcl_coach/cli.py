@@ -19,6 +19,8 @@ from .api import SITES, WCLClient, WCLError
 from .fetch import Fetcher, Fight, parse_report_ref
 from .render import to_markdown, to_terminal
 
+REPORTS_DIR = Path("reports")
+
 
 def _load_dotenv() -> None:
     for p in (Path.cwd() / ".env", Path.home() / ".config" / "wcl-coach" / ".env"):
@@ -121,8 +123,12 @@ def cmd_analyze(args) -> None:
         md = "\n\n---\n\n".join(to_markdown(*r) for r in all_results)
         if len(all_results) > 1:
             md = recurring_summary(all_results, markdown=True) + "\n\n---\n\n" + md
-        Path(args.md).write_text(md, encoding="utf-8")
-        _log(f"Markdown gespeichert: {args.md}")
+        out = Path(args.md)
+        if out.parent == Path("."):  # bare file name -> reports/ folder
+            out = REPORTS_DIR / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
+        _log(f"Markdown gespeichert: {out}")
 
 
 def recurring_summary(results, markdown: bool = False) -> str:
@@ -165,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     a.add_argument("--top", type=int, default=5, help="Anzahl Top-Parses zum Vergleich (0 = aus)")
     a.add_argument("--gap", type=float, default=2.5, help="Cast-Pause ab der Downtime zählt (s)")
-    a.add_argument("--md", help="Ergebnis zusätzlich als Markdown speichern")
+    a.add_argument("--md", help="Ergebnis zusätzlich als Markdown speichern (reiner Dateiname -> reports/)")
     a.set_defaults(func=cmd_analyze)
 
     f = sub.add_parser("fights", help="Boss-Kämpfe eines Reports auflisten")

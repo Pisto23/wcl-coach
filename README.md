@@ -42,6 +42,7 @@ wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890 -p Peter
 wcl-coach analyze AbCdEf1234567890 -p Peter -f 12
 
 # All kills of the evening + recurring patterns + Markdown export
+# (a bare file name is saved to reports/, which is git-ignored)
 wcl-coach analyze AbCdEf1234567890 -p Peter -f kills --md raid-2026-10-17.md
 
 # List boss pulls / check API budget
@@ -61,7 +62,6 @@ Options: `--top N` benchmark players (default 5, `0` = only absolute checks), `-
 - **Secondary stats** are rating values at pull time (no procs). A deviation from top players is a hint to sim (Raidbots Top Gear / Droptimizer), not a rule – build and boss type shift weights. Field names are parsed by pattern, flat or nested under `stats`.
 - **Buff comparisons** can also reflect raid composition (missing class buff), the output says so.
 - **Wipes:** analysis works, but there's no parse; benchmark comparisons still use kill logs from top players.
-- **Not yet verified against the live API from my side** – the query shapes follow the v2 schema docs. If a field errors out, the GraphQL message is printed; fixes are usually one line in `fetch.py`. The `DamageTaken` table is filtered with `sourceID` (WCL's "selected player" perspective).
 
 ## Extending with spec-specific rules
 
