@@ -52,6 +52,7 @@ class PlayerFight:
     damage_taken: list[dict] = field(default_factory=list)  # name, guid, total(=amount)
     buffs: list[dict] = field(default_factory=list)  # name, guid, totalUptime, totalUses
     buffs_total_time: float = 0.0
+    self_buff_ids: set[int] | None = None  # auras the player applied to themselves; None = unknown
     damage_done_total: float = 0.0
     healing_done_total: float = 0.0
     deaths: list[dict] = field(default_factory=list)
@@ -288,6 +289,19 @@ class Fetcher:
         )
         ci = [e for e in self._events(code, fight, player.id, "CombatantInfo") if e.get("type") == "combatantinfo"]
         pf.combatant_info = ci[0] if ci else None
+        # The Buffs table lists every aura *on* the player, incl. ones from other classes
+        # (e.g. a shaman's Earthliving Weapon). Remember which ones the player applied themselves.
+        self_ids = {
+            e["abilityGameID"]
+            for e in self._events(code, fight, player.id, "Buffs")
+            if e.get("sourceID") == player.id and e.get("targetID", player.id) == player.id and "abilityGameID" in e
+        }
+        self_ids |= {
+            a["ability"]
+            for a in (pf.combatant_info or {}).get("auras") or []
+            if a.get("source") == player.id and "ability" in a
+        }
+        pf.self_buff_ids = self_ids
         return pf
 
     # -- benchmark -----------------------------------------------------------

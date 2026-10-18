@@ -121,6 +121,21 @@ def test_buffs_missing_flask_and_low_uptime():
     assert cats == {"Vorbereitung", "Buff-Uptime"}
 
 
+def test_buffs_from_other_classes_are_not_blamed_on_player():
+    hot = {"name": "Earthliving Weapon", "guid": 7, "totalUptime": DUR * 0.6}
+    raid = {"name": "Skyfury", "guid": 6, "totalUptime": DUR}
+    own = {"name": "Heating Up", "guid": 8, "totalUptime": DUR * 0.6}
+    tops = [top(f"T{i}", buffs=[hot, raid, own]) for i in range(3)]
+    for t in tops:
+        t.self_buff_ids = {8}
+    me = make_pf(buffs=[{**own, "totalUptime": DUR * 0.2}])
+    me.self_buff_ids = {8}
+    fs = A.analyze_buffs(me, tops, A.Settings())
+    titles = " ".join(f.title for f in fs)
+    assert "Earthliving" not in titles
+    assert {f.category for f in fs} == {"Buff-Uptime", "Raid-Buff"}
+
+
 # ----------------------------------------------------------- deaths/utility
 
 

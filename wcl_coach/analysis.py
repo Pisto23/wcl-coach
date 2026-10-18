@@ -366,14 +366,17 @@ def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) 
 # ================================================================== 6. buffs
 
 
-def _uptimes(pf: PlayerFight) -> dict[str, tuple[str, float]]:
+def _uptimes(pf: PlayerFight) -> dict[str, tuple[str, float, bool]]:
+    """name-key -> (display name, uptime %, applied by the player themselves)."""
     tt = pf.buffs_total_time or (pf.fight.end - pf.fight.start)
-    idx: dict[str, tuple[str, float]] = {}
+    idx: dict[str, tuple[str, float, bool]] = {}
     for a in pf.buffs:
         name = a.get("name") or str(a.get("guid"))
         k = _norm_name(name)
         up = min(100.0, 100.0 * float(a.get("totalUptime", 0)) / tt)
-        idx[k] = (name, max(up, idx.get(k, (name, 0.0))[1]))
+        own = pf.self_buff_ids is None or a.get("guid") in pf.self_buff_ids
+        prev = idx.get(k, (name, 0.0, False))
+        idx[k] = (name, max(up, prev[1]), own or prev[2])
     return idx
 
 
@@ -385,7 +388,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
     keys = {k for ti in top_idx for k in ti}
     out: list[Finding] = []
     for k in keys:
-        vals = [ti.get(k, ("", 0.0))[1] for ti in top_idx]
+        vals = [ti[k][1] if k in ti else 0.0 for ti in top_idx]
         have = sum(1 for v in vals if v > 0)
         if have / len(tops) < 0.6:
             continue
@@ -393,15 +396,30 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
         if med < 30:
             continue
         name = next(ti[k][0] for ti in top_idx if k in ti)
-        my = mine.get(k, (name, 0.0))[1]
+        my = mine[k][1] if k in mine else 0.0
+        # buffs that only ever come from other players (raid buffs, healer HoTs, ...)
+        # depend on raid composition, not on the player's own play
+        external = not any(ti[k][2] for ti in top_idx if k in ti)
+        if external:
+            if my == 0 and med >= 95:
+                out.append(
+                    Finding(
+                        LOW,
+                        "Raid-Buff",
+                        f"Raid-Buff '{name}' fehlt (Top: {med:.0f}% Uptime)",
+                        tip="Kommt von einer anderen Klasse – liegt an der Raid-Zusammensetzung, "
+                        "nicht an deinem Spiel.",
+                        impact=med / 10,
+                    )
+                )
+            continue
         if my == 0 and med >= 95:
             out.append(
                 Finding(
                     MEDIUM,
                     "Vorbereitung",
                     f"Dauerbuff '{name}' fehlt komplett (Top: {med:.0f}% Uptime)",
-                    tip="Flask/Food/Augment Rune/Waffenöl/Klassenbuff? "
-                    "Kann auch an fehlender Klasse im Raid liegen.",
+                    tip="Flask/Food/Augment Rune/Waffenöl?",
                     impact=med,
                 )
             )
@@ -411,7 +429,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                     MEDIUM if med - my > 30 else LOW,
                     "Buff-Uptime",
                     f"'{name}': {my:.0f}% Uptime vs. {med:.0f}% bei Top-Spielern",
-                    tip="Wenn das ein selbst erzeugter Buff/Proc ist: Rotation darauf ausrichten, "
+                    tip="Selbst erzeugter Buff/Proc: Rotation darauf ausrichten, "
                     "ihn nicht auslaufen zu lassen.",
                     impact=med - my,
                 )
