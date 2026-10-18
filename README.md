@@ -13,7 +13,7 @@ The key idea: almost every check compares you against the **top parses of your o
 | Activity (ABC) | Gaps between casts above `--gap` seconds → active %, longest gaps with timestamps, opener delay; time after death is excluded |
 | Rotation / cooldowns | Casts per minute per ability vs. top median: abilities you never press, cooldowns you could have used more often, fillers you overuse |
 | Avoidable damage | Damage taken per ability vs. top players – abilities they take ~0 from are flagged as very likely avoidable |
-| Buffs / prep | Persistent buffs (flask, food, rune, …) missing, procs/self-buffs with clearly lower uptime |
+| Buffs / prep | Persistent self-applied buffs (flask, food, rune, …) missing, procs/self-buffs with clearly lower uptime. Buffs that only come from other players (raid buffs, healer HoTs) are not counted against you; a missing raid buff is only noted as low priority |
 | Gear & secondary stats | Snapshot at pull (`combatantinfo`): secondary distribution (Crit/Haste/Mastery/Vers) vs. top median, missing enchants per slot, weapon oil, gem count, trinkets popular among top players (Wowhead link), avg item level |
 | Consumables / utility | No combat potion detected, interrupts |
 | Recurring patterns | With `--fight kills` or `all`: issues that repeat across pulls (your actual habits) |
@@ -41,6 +41,10 @@ wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890 -p Peter
 # Specific fight (also picked up from ?fight=12 in the URL)
 wcl-coach analyze AbCdEf1234567890 -p Peter -f 12
 
+# All pulls of one boss, or an ID range (see "Selecting fights")
+wcl-coach analyze AbCdEf1234567890 -p Peter -f sszorak
+wcl-coach analyze AbCdEf1234567890 -p Peter -f 23-41
+
 # All kills of the evening + recurring patterns + Markdown export
 # (a bare file name is saved to reports/, which is git-ignored)
 wcl-coach analyze AbCdEf1234567890 -p Peter -f kills --md raid-2026-10-17.md
@@ -53,6 +57,31 @@ wcl-coach quota
 wcl-coach --site classic analyze <code> -p Name
 ```
 
+### Selecting fights (`-f` / `--fight`)
+
+| Value | Selects |
+|---|---|
+| *(none)* | `?fight=` from the URL, otherwise `last-kill` |
+| `last-kill` | last kill (falls back to the last pull) |
+| `last` | last pull, kill or wipe |
+| `kills` | every kill in the report |
+| `all` | every boss pull, incl. wipes |
+| `12` · `3,7,12` | specific fight IDs (`wcl-coach fights <report>` lists them) |
+| `23-41` | ID range, inclusive |
+| `sszorak` · `nek,sszorak` | every pull of bosses whose name contains the text (case-insensitive) |
+
+Parts can be mixed with commas, e.g. `-f 5,29,40-41` or `-f kith,sszorak`. Notes:
+
+- Quote names with apostrophes or spaces: `-f "kith'ix"`, `-f "lost explorers"` – or just use an unambiguous fragment like `kith`.
+- Generic fragments match several bosses (`the` → *Nek'zali the Soulcoiler* and *The Lost Explorers*).
+- A boss name selects kills **and** wipes. For just the kill, use its ID.
+- `all`, `kills`, `last` and `last-kill` are keywords and are never matched as boss names.
+- Many pulls cost many API points (each one fetches top players too) – check `wcl-coach quota` first. Very short wipes add little and skew the recurring-patterns summary; picking the longer attempts is usually more useful.
+
+### Markdown reports
+
+`--md <file>` writes the full result (incl. the recurring-patterns summary for multiple fights) as Markdown. A bare file name goes to `reports/` in the current directory (created if needed, git-ignored); a path with a directory, e.g. `--md ~/Desktop/raid.md`, is used as given.
+
 Options: `--top N` benchmark players (default 5, `0` = only absolute checks), `--gap 2.5` downtime threshold in seconds, `--no-cache`.
 
 ## Notes
@@ -60,7 +89,7 @@ Options: `--top N` benchmark players (default 5, `0` = only absolute checks), `-
 - **API budget:** the public API has an hourly point budget. Each benchmark player costs a few queries; responses are cached under `~/.cache/wcl-coach` (reports are immutable), so re-runs are nearly free. Rankings are always fetched fresh.
 - **Activity is relative:** channeled spells show up as "gaps" in cast events. That's why the verdict compares against top players of the same spec instead of an absolute target.
 - **Secondary stats** are rating values at pull time (no procs). A deviation from top players is a hint to sim (Raidbots Top Gear / Droptimizer), not a rule – build and boss type shift weights. Field names are parsed by pattern, flat or nested under `stats`.
-- **Buff comparisons** can also reflect raid composition (missing class buff), the output says so.
+- **Buff comparisons** only judge buffs the player applies themselves (detected from buff events and the pull snapshot). Auras from other classes, e.g. a shaman's *Earthliving Weapon*, depend on raid composition and are ignored, or flagged as low-priority "Raid-Buff" if top players always have them.
 - **Wipes:** analysis works, but there's no parse; benchmark comparisons still use kill logs from top players.
 
 ## Extending with spec-specific rules

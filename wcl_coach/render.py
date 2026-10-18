@@ -11,6 +11,19 @@ from .fetch import PlayerFight
 _COLORS = {HIGH: "\033[91m", MEDIUM: "\033[93m", LOW: "\033[96m", INFO: "\033[90m"}
 _RESET, _BOLD = "\033[0m", "\033[1m"
 
+# Markdown has no colors – inline HTML renders in VS Code, Obsidian, Typora etc.
+_MD_BG = {HIGH: "#f8a5a5", MEDIUM: "#ffe066", LOW: "#8ce99a"}
+_MD_STATS_BG = "#a5d8ff"
+
+
+def _md_hl(text: str, bg: str) -> str:
+    return f'<span style="background:{bg};color:#000;padding:0 4px;border-radius:3px">{text}</span>'
+
+
+def md_severity(sev: int) -> str:
+    label = f"[{SEVERITY_LABEL[sev]}]"
+    return _md_hl(label, _MD_BG[sev]) if sev in _MD_BG else label
+
 
 def _use_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
@@ -65,13 +78,16 @@ def to_markdown(me: PlayerFight, tops: list[PlayerFight], findings: list[Finding
     md = [f"# {h[0]}", "", f"_{h[1]}_  ", f"_{h[2]}_", ""]
     infos = [f for f in findings if f.severity == INFO]
     if infos:
-        md += ["## Überblick", ""] + [f"- **{f.category}:** {f.title}" for f in infos] + [""]
+        md += ["## Überblick", ""] + [
+            f"- **{f.category}:** " + (_md_hl(f.title, _MD_STATS_BG) if f.category == "Stats" else f.title)
+            for f in infos
+        ] + [""]
     actionable = [f for f in findings if f.severity > INFO]
     md += ["## Verbesserungspunkte", ""]
     if not actionable:
         md.append("Keine Auffälligkeiten gefunden.")
     for i, f in enumerate(actionable, 1):
-        md.append(f"### {i}. [{SEVERITY_LABEL[f.severity]}] {f.category}: {f.title}")
+        md.append(f"### {i}. {md_severity(f.severity)} {f.category}: {f.title}")
         if f.detail:
             md.append(f.detail + "  ")
         if f.tip:

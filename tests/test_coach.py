@@ -307,3 +307,13 @@ def test_resolve_player_error_lists_names():
     details = {"playerDetails": {"dps": [{"id": 5, "name": "Alice", "type": "Mage", "specs": []}]}}
     with pytest.raises(Exception, match="Alice"):
         Fetcher.resolve_player(details, "Bob", None)
+
+
+def test_select_fights_ranges_and_boss_names():
+    from wcl_coach.cli import _select_fights
+    from wcl_coach.fetch import Fight
+    fs = [Fight(id=i, name=n, start=0, end=1, kill=False, encounter_id=1, difficulty=5)
+          for i, n in [(5, "Kith'ix"), (23, "Sszorak"), (24, "Sszorak"), (30, "Sszorak")]]
+    assert [f.id for f in _select_fights(fs, "23-24", None)] == [23, 24]
+    assert [f.id for f in _select_fights(fs, "sszorak", None)] == [23, 24, 30]
+    assert [f.id for f in _select_fights(fs, "5,24-30", None)] == [5, 24, 30]

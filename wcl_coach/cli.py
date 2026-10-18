@@ -17,7 +17,7 @@ from pathlib import Path
 from .analysis import INFO, SEVERITY_LABEL, Settings, run_all
 from .api import SITES, WCLClient, WCLError
 from .fetch import Fetcher, Fight, parse_report_ref
-from .render import to_markdown, to_terminal
+from .render import md_severity, to_markdown, to_terminal
 
 REPORTS_DIR = Path("reports")
 
@@ -59,8 +59,16 @@ def _select_fights(fights: list[Fight], sel: str | None, url_fight: int | None) 
         return kills or [fights[-1]]
     if sel == "all":
         return fights
-    ids = {int(x) for x in sel.split(",") if x.strip().isdigit()}
-    chosen = [f for f in fights if f.id in ids]
+    ids: set[int] = set()
+    names: list[str] = []
+    for part in (x.strip() for x in sel.split(",")):
+        if m := re.fullmatch(r"(\d+)\s*-\s*(\d+)", part):
+            ids.update(range(int(m[1]), int(m[2]) + 1))
+        elif part.isdigit():
+            ids.add(int(part))
+        elif part:
+            names.append(part.lower())
+    chosen = [f for f in fights if f.id in ids or any(n in f.name.lower() for n in names)]
     if not chosen:
         raise WCLError(f"Fight(s) '{sel}' nicht gefunden. 'wcl-coach fights <report>' zeigt alle.")
     return chosen
@@ -151,7 +159,8 @@ def recurring_summary(results, markdown: bool = False) -> str:
         lines.append("Keine Muster, die sich in mehreren Kämpfen wiederholen.")
     for k, fs in recurring[:12]:
         sev = Counter(f.severity for f in fs).most_common(1)[0][0]
-        lines.append(f"{'- ' if markdown else '  '}{len(fs)}/{n}× [{SEVERITY_LABEL[sev]}] {fs[-1].category}: {fs[-1].title}")
+        label = md_severity(sev) if markdown else f"[{SEVERITY_LABEL[sev]}]"
+        lines.append(f"{'- ' if markdown else '  '}{len(fs)}/{n}× {label} {fs[-1].category}: {fs[-1].title}")
     return "\n".join(lines)
 
 
@@ -167,7 +176,8 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("-p", "--player", help="Charaktername")
     a.add_argument(
         "-f", "--fight",
-        help="Fight-ID(s) '12' / '3,7,12', 'last', 'last-kill' (Standard), 'kills', 'all'",
+        help="Fight-ID(s) '12' / '3,7,12' / '23-41', Bossname 'sszorak', "
+        "'last', 'last-kill' (Standard), 'kills', 'all'",
     )
     a.add_argument("--top", type=int, default=5, help="Anzahl Top-Parses zum Vergleich (0 = aus)")
     a.add_argument("--gap", type=float, default=2.5, help="Cast-Pause ab der Downtime zählt (s)")
