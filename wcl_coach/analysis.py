@@ -37,6 +37,7 @@ class Finding:
     tip: str = ""
     impact: float = 0.0  # used to order findings within a severity
     rows: list[tuple] = field(default_factory=list)  # optional table rows
+    spells: dict[str, int] = field(default_factory=dict)  # ability name in the title -> spell ID (tooltips)
 
 
 def fmt_t(seconds: float) -> str:
@@ -89,6 +90,27 @@ def analyze_performance(me: PlayerFight, tops: list[PlayerFight], s: Settings) -
 HEAL_CONSUMABLE_RE = re.compile(r"healthstone|healing potion|heilstein|heiltrank", re.I)
 
 
+def killing_blow(death: dict) -> tuple[str, int | None]:
+    """(name, spell ID) of what killed the player. WCL often leaves killingBlow empty –
+    then the latest hit of the death recap, or the biggest damage source, is the best guess."""
+    kb = death.get("killingBlow") or {}
+    if kb.get("name"):
+        return kb["name"], kb.get("guid")
+    hits = [e for e in death.get("events") or [] if e.get("type") == "damage" and (e.get("ability") or {}).get("name")]
+    if hits:
+        ability = max(hits, key=lambda e: e.get("timestamp", 0))["ability"]
+        return ability["name"], ability.get("guid")
+    abilities = (death.get("damage") or {}).get("abilities") or []
+    if abilities:
+        top = max(abilities, key=lambda a: a.get("total", 0))
+        return top.get("name") or "unbekannt", top.get("guid")
+    return "unbekannt", None
+
+
+def _spell(name: str, guid: int | None) -> dict[str, int]:
+    return {name: guid} if guid else {}
+
+
 def analyze_deaths(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list[Finding]:
     out: list[Finding] = []
     if not me.deaths:
@@ -99,7 +121,7 @@ def analyze_deaths(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> lis
     for d in sorted(me.deaths, key=lambda x: x.get("timestamp", 0)):
         t = (d.get("timestamp", me.fight.start) - me.fight.start) / 1000.0
         pct = t / me.duration_s * 100
-        kb = (d.get("killingBlow") or {}).get("name") or "unbekannt"
+        kb, kb_id = killing_blow(d)
         used_heal = any(
             e.get("abilityGameID") in heal_guids and e.get("timestamp", 0) <= d.get("timestamp", 0)
             for e in me.cast_events
@@ -120,6 +142,7 @@ def analyze_deaths(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> lis
                 detail=f"{fmt_t(lost)} Kampfzeit verloren – das kostet meist mehr als jeder Rotationsfehler.",
                 tip=" ".join(tip_parts),
                 impact=lost,
+                spells=_spell(kb, kb_id),
             )
         )
     return out
@@ -215,16 +238,16 @@ IGNORE_CAST_RE = re.compile(r"^(melee|auto shot|shoot)$", re.I)
 CONSUMABLE_RE = re.compile(r"potion|trank|healthstone|heilstein|phial|flask", re.I)
 
 
-def _cast_index(pf: PlayerFight) -> dict[str, tuple[str, float]]:
-    """key -> (display name, count). Keyed by normalized name so rank/variant IDs merge."""
-    idx: dict[str, tuple[str, float]] = {}
+def _cast_index(pf: PlayerFight) -> dict[str, tuple[str, float, int | None]]:
+    """key -> (display name, count, spell ID). Keyed by normalized name so rank/variant IDs merge."""
+    idx: dict[str, tuple[str, float, int | None]] = {}
     for c in pf.casts:
         name = c.get("name") or str(c.get("guid"))
         if IGNORE_CAST_RE.match(name) or CONSUMABLE_RE.search(name):
             continue
         k = _norm_name(name)
-        prev = idx.get(k, (name, 0.0))[1]
-        idx[k] = (name, prev + float(c.get("total", 0)))
+        prev = idx.get(k, (name, 0.0, c.get("guid")))
+        idx[k] = (name, prev[1] + float(c.get("total", 0)), prev[2])
     return idx
 
 
@@ -237,11 +260,14 @@ def analyze_casts(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
     keys = set(mine) | {k for ti in top_idx for k in ti}
 
     missing, under, over = [], [], []
+    ids: dict[str, int | None] = {}
     for k in keys:
         top_counts = [ti.get(k, ("", 0.0))[1] for ti in top_idx]
         top_cpm = [_per_minute(c, _alive_s(t)) for c, t in zip(top_counts, tops)]
         users = sum(1 for c in top_counts if c > 0)
-        name = mine.get(k, (None, 0))[0] or next(ti[k][0] for ti in top_idx if k in ti)
+        entry = mine.get(k) or next(ti[k] for ti in top_idx if k in ti)
+        name = entry[0]
+        ids[name] = entry[2]
         my_count = mine.get(k, (name, 0.0))[1]
         my_cpm = _per_minute(my_count, my_dur)
         med_cpm = median(top_cpm)
@@ -265,6 +291,7 @@ def analyze_casts(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                 f"'{name}' nie benutzt – Top-Spieler: ~{med_count:.0f}× pro Kampf",
                 tip="Talent/Build prüfen (evtl. anders geskillt) – sonst fest in Rotation/CD-Plan aufnehmen.",
                 impact=med_count,
+                spells=_spell(name, ids[name]),
             )
         )
     for name, mc, exp, my_cpm, med_cpm in sorted(under, key=lambda x: -(x[2] - x[1]))[:8]:
@@ -282,6 +309,7 @@ def analyze_casts(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                     else "Priorität prüfen: diese Fähigkeit wird zu selten gedrückt."
                 ),
                 impact=exp - mc,
+                spells=_spell(name, ids[name]),
             )
         )
     for name, my_cpm, med_cpm in sorted(over, key=lambda x: -(x[1] / x[2]))[:5]:
@@ -292,6 +320,7 @@ def analyze_casts(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                 f"'{name}' deutlich öfter als Top-Spieler ({my_cpm:.1f}/min vs. {med_cpm:.1f}/min)",
                 tip="Oft ein Filler, der stärkere Fähigkeiten verdrängt – Prioritätsliste prüfen.",
                 impact=my_cpm / med_cpm,
+                spells=_spell(name, ids[name]),
             )
         )
     return out
@@ -300,19 +329,20 @@ def analyze_casts(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
 # ========================================================== 5. damage taken
 
 
-def _taken_index(pf: PlayerFight) -> dict[str, tuple[str, float]]:
-    idx: dict[str, tuple[str, float]] = {}
+def _taken_index(pf: PlayerFight) -> dict[str, tuple[str, float, int | None]]:
+    """key -> (display name, amount, spell ID)."""
+    idx: dict[str, tuple[str, float, int | None]] = {}
     for e in pf.damage_taken:
         name = e.get("name") or str(e.get("guid"))
         k = _norm_name(name)
-        prev = idx.get(k, (name, 0.0))[1]
-        idx[k] = (name, prev + float(e.get("total", 0)))
+        prev = idx.get(k, (name, 0.0, e.get("guid")))
+        idx[k] = (name, prev[1] + float(e.get("total", 0)), prev[2])
     return idx
 
 
 def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list[Finding]:
     mine = _taken_index(me)
-    total = sum(v for _, v in mine.values()) or 1.0
+    total = sum(v for _, v, _ in mine.values()) or 1.0
     my_alive = _alive_s(me)
     out: list[Finding] = []
 
@@ -324,13 +354,14 @@ def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) 
                     INFO,
                     "Schaden erhalten",
                     "Größte Schadensquellen: "
-                    + ", ".join(f"{n} ({v / total * 100:.0f}%)" for n, v in rows),
+                    + ", ".join(f"'{n}' ({v / total * 100:.0f}%)" for n, v, _ in rows),
+                    spells={n: g for n, _, g in rows if g},
                 )
             )
         return out
 
     top_idx = [_taken_index(t) for t in tops]
-    for k, (name, amount) in mine.items():
+    for k, (name, amount, guid) in mine.items():
         share = amount / total
         if share < s.taken_min_share:
             continue
@@ -347,6 +378,7 @@ def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) 
                     tip="Sehr wahrscheinlich vermeidbar: Mechanik im Dungeon-/Raid-Guide nachlesen "
                     "(Positionierung, Ausweichen, Timing).",
                     impact=share * 100 + 10,
+                    spells=_spell(name, guid),
                 )
             )
         elif med > 0 and my_ps > med * s.taken_over_ratio:
@@ -358,6 +390,7 @@ def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) 
                     detail=f"{share * 100:.0f}% deines erhaltenen Schadens",
                     tip="Teilweise vermeidbar oder per Defensive/Positionierung reduzierbar.",
                     impact=share * 100 * (my_ps / med),
+                    spells=_spell(name, guid),
                 )
             )
     return out
@@ -366,17 +399,17 @@ def analyze_damage_taken(me: PlayerFight, tops: list[PlayerFight], s: Settings) 
 # ================================================================== 6. buffs
 
 
-def _uptimes(pf: PlayerFight) -> dict[str, tuple[str, float, bool]]:
-    """name-key -> (display name, uptime %, applied by the player themselves)."""
+def _uptimes(pf: PlayerFight) -> dict[str, tuple[str, float, bool, int | None]]:
+    """name-key -> (display name, uptime %, applied by the player themselves, spell ID)."""
     tt = pf.buffs_total_time or (pf.fight.end - pf.fight.start)
-    idx: dict[str, tuple[str, float, bool]] = {}
+    idx: dict[str, tuple[str, float, bool, int | None]] = {}
     for a in pf.buffs:
         name = a.get("name") or str(a.get("guid"))
         k = _norm_name(name)
         up = min(100.0, 100.0 * float(a.get("totalUptime", 0)) / tt)
         own = pf.self_buff_ids is None or a.get("guid") in pf.self_buff_ids
-        prev = idx.get(k, (name, 0.0, False))
-        idx[k] = (name, max(up, prev[1]), own or prev[2])
+        prev = idx.get(k, (name, 0.0, False, a.get("guid")))
+        idx[k] = (name, max(up, prev[1]), own or prev[2], prev[3])
     return idx
 
 
@@ -395,7 +428,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
         med = median(vals)
         if med < 30:
             continue
-        name = next(ti[k][0] for ti in top_idx if k in ti)
+        name, _, _, guid = next(ti[k] for ti in top_idx if k in ti)
         my = mine[k][1] if k in mine else 0.0
         # buffs that only ever come from other players (raid buffs, healer HoTs, ...)
         # depend on raid composition, not on the player's own play
@@ -410,6 +443,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                         tip="Kommt von einer anderen Klasse – liegt an der Raid-Zusammensetzung, "
                         "nicht an deinem Spiel.",
                         impact=med / 10,
+                        spells=_spell(name, guid),
                     )
                 )
             continue
@@ -421,6 +455,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                     f"Dauerbuff '{name}' fehlt komplett (Top: {med:.0f}% Uptime)",
                     tip="Flask/Food/Augment Rune/Waffenöl?",
                     impact=med,
+                    spells=_spell(name, guid),
                 )
             )
         elif med - my > s.buff_uptime_gap_pp:
@@ -432,6 +467,7 @@ def analyze_buffs(me: PlayerFight, tops: list[PlayerFight], s: Settings) -> list
                     tip="Selbst erzeugter Buff/Proc: Rotation darauf ausrichten, "
                     "ihn nicht auslaufen zu lassen.",
                     impact=med - my,
+                    spells=_spell(name, guid),
                 )
             )
     return out

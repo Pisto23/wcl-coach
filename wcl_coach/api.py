@@ -25,6 +25,7 @@ SITES = {
 }
 
 CACHE_DIR = Path(os.environ.get("WCL_COACH_CACHE", Path.home() / ".cache" / "wcl-coach"))
+CONFIG_ENV = Path.home() / ".config" / "wcl-coach" / ".env"  # credentials, besides ./.env
 
 
 class WCLError(RuntimeError):

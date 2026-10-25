@@ -3,7 +3,9 @@
 Examples:
   wcl-coach analyze https://www.warcraftlogs.com/reports/AbCdEf1234567890?fight=12 -p <charname>
   wcl-coach analyze AbCdEf1234567890 -p <charname> --fight kills --md report.md
+  wcl-coach raid AbCdEf1234567890 --md raid.md
   wcl-coach fights AbCdEf1234567890
+  wcl-coach ui
 """
 from __future__ import annotations
 
@@ -11,21 +13,25 @@ import argparse
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
-from .analysis import INFO, SEVERITY_LABEL, Settings, run_all
-from .api import SITES, WCLClient, WCLError
-from .fetch import Fetcher, Fight, parse_report_ref
-from .render import md_severity, to_markdown, to_terminal
+from .analysis import SEVERITY_LABEL, Settings
+from .api import CONFIG_ENV, SITES, WCLClient, WCLError
+from .fetch import Fetcher, parse_report_ref
+from .pipeline import player_fights, raid_fights, recurring, select_fights
+from .raid import RaidSettings
+from .render import md_severity, raid_summary, to_markdown, to_terminal
 
 REPORTS_DIR = Path("reports")
+FIGHT_HELP = ("Fight-ID(s) '12' / '3,7,12' / '23-41', Bossname 'sszorak', nur Kills/Wipes 'sszorak:wipes', "
+              "'last', 'last-kill', 'kills', 'wipes', 'all'")
 
 
 def _load_dotenv() -> None:
-    for p in (Path.cwd() / ".env", Path.home() / ".config" / "wcl-coach" / ".env"):
+    for p in (Path.cwd() / ".env", CONFIG_ENV):
         if p.exists():
-            for line in p.read_text().splitlines():
+            for line in p.read_text(encoding="utf-8").splitlines():
                 m = re.match(r"\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$", line)
                 if m and m.group(1) not in os.environ:
                     os.environ[m.group(1)] = m.group(2).strip().strip("'\"")
@@ -46,32 +52,13 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _select_fights(fights: list[Fight], sel: str | None, url_fight: int | None) -> list[Fight]:
-    if not fights:
-        raise WCLError("Report enthält keine Boss-Kämpfe.")
-    sel = sel or (str(url_fight) if url_fight else "last-kill")
-    kills = [f for f in fights if f.kill]
-    if sel == "last-kill":
-        return [kills[-1] if kills else fights[-1]]
-    if sel == "last":
-        return [fights[-1]]
-    if sel == "kills":
-        return kills or [fights[-1]]
-    if sel == "all":
-        return fights
-    ids: set[int] = set()
-    names: list[str] = []
-    for part in (x.strip() for x in sel.split(",")):
-        if m := re.fullmatch(r"(\d+)\s*-\s*(\d+)", part):
-            ids.update(range(int(m[1]), int(m[2]) + 1))
-        elif part.isdigit():
-            ids.add(int(part))
-        elif part:
-            names.append(part.lower())
-    chosen = [f for f in fights if f.id in ids or any(n in f.name.lower() for n in names)]
-    if not chosen:
-        raise WCLError(f"Fight(s) '{sel}' nicht gefunden. 'wcl-coach fights <report>' zeigt alle.")
-    return chosen
+def _write_md(path: str, md: str) -> None:
+    out = Path(path)
+    if out.parent == Path("."):  # bare file name -> reports/ folder
+        out = REPORTS_DIR / out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md, encoding="utf-8")
+    _log(f"Markdown gespeichert: {out}")
 
 
 # ---------------------------------------------------------------- commands
@@ -99,26 +86,13 @@ def cmd_analyze(args) -> None:
 
     fx = Fetcher(_client(args), log=_log)
     rep = fx.report(code)
-    fights = _select_fights([Fetcher.to_fight(f) for f in rep["fights"]], args.fight, url_fight)
+    fights = select_fights([Fetcher.to_fight(f) for f in rep["fights"]], args.fight, url_fight)
     settings = Settings(gap_threshold_s=args.gap)
 
     all_results = []
-    for fight in fights:
-        _log(f"→ {fight.name} (#{fight.id})")
-        details, r_dps, r_hps = fx.player_details(code, fight.id)
-        try:
-            player = fx.resolve_player(details, player_name, url_source)
-        except WCLError as e:
-            _log(f"  übersprungen: {e}")
-            continue
-        me = fx.player_fight(code, fight, player)
-        rank, amount = fx.rank_for(r_hps if player.role == "healer" else r_dps, player)
-        me.rank_percent, me.amount_per_s = rank, amount
-        tops = fx.top_players(me, n=args.top) if args.top > 0 else []
-        findings = run_all(me, tops, settings)
-        all_results.append((me, tops, findings))
-
-        print(to_terminal(me, tops, findings))
+    for result in player_fights(fx, code, fights, player_name, url_source, args.top, settings, _log):
+        all_results.append(result)
+        print(to_terminal(*result))
         print("\n" + "─" * 72 + "\n")
 
     if not all_results:
@@ -131,33 +105,49 @@ def cmd_analyze(args) -> None:
         md = "\n\n---\n\n".join(to_markdown(*r) for r in all_results)
         if len(all_results) > 1:
             md = recurring_summary(all_results, markdown=True) + "\n\n---\n\n" + md
-        out = Path(args.md)
-        if out.parent == Path("."):  # bare file name -> reports/ folder
-            out = REPORTS_DIR / out
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(md, encoding="utf-8")
-        _log(f"Markdown gespeichert: {out}")
+        _write_md(args.md, md)
+
+
+def cmd_raid(args) -> None:
+    code, url_fight, _ = parse_report_ref(args.report)
+    only = {n.strip().lower() for n in args.player.split(",") if n.strip()} if args.player else None
+    settings = RaidSettings(ignore=tuple(x.strip() for x in (args.ignore or "").split(",") if x.strip()))
+
+    fx = Fetcher(_client(args), log=_log)
+    rep = fx.report(code)
+    sel = args.fight or (None if url_fight else "all")
+    fights = select_fights([Fetcher.to_fight(f) for f in rep["fights"]], sel, url_fight)
+    reports = list(raid_fights(fx, code, fights, settings, _log))
+
+    if not reports:
+        sys.exit("Keine auswertbaren Kämpfe gefunden.")
+    if only:
+        unknown = only - {p.name.lower() for r in reports for p in r.players}
+        if unknown:
+            _log(f"Nicht im Report gefunden: {', '.join(sorted(unknown))}")
+
+    print(raid_summary(rep["title"], reports, only))
+    if args.md:
+        _write_md(args.md, raid_summary(rep["title"], reports, only, markdown=True))
+
+
+def cmd_ui(args) -> None:
+    try:
+        from .ui import run_ui
+    except ImportError:
+        sys.exit("Die UI braucht NiceGUI: pip install -e '.[ui]'")
+    run_ui(site=args.site, use_cache=not args.no_cache, host=args.host, port=args.port, show=not args.no_browser)
 
 
 def recurring_summary(results, markdown: bool = False) -> str:
-    """Groups findings that repeat across pulls – those are your real habits."""
-    groups: dict[str, list] = defaultdict(list)
-    for _, _, findings in results:
-        for f in findings:
-            if f.severity == INFO:
-                continue
-            key = f"{f.category}|" + re.sub(r"[\d.,:]+", "#", f.title)
-            groups[key].append(f)
+    """Findings that repeat across pulls – those are your real habits."""
     n = len(results)
-    recurring = sorted(
-        ((k, fs) for k, fs in groups.items() if len(fs) >= 2),
-        key=lambda kv: (-len(kv[1]), -max(f.severity for f in kv[1])),
-    )
     head = f"Wiederkehrende Muster über {n} Kämpfe"
     lines = [f"## {head}" if markdown else head, ""]
-    if not recurring:
+    groups = recurring(results)
+    if not groups:
         lines.append("Keine Muster, die sich in mehreren Kämpfen wiederholen.")
-    for k, fs in recurring[:12]:
+    for fs in groups[:12]:
         sev = Counter(f.severity for f in fs).most_common(1)[0][0]
         label = md_severity(sev) if markdown else f"[{SEVERITY_LABEL[sev]}]"
         lines.append(f"{'- ' if markdown else '  '}{len(fs)}/{n}× {label} {fs[-1].category}: {fs[-1].title}")
@@ -174,15 +164,19 @@ def main(argv: list[str] | None = None) -> None:
     a = sub.add_parser("analyze", help="Spieler in einem oder mehreren Kämpfen auswerten")
     a.add_argument("report", help="Report-URL oder 16-stelliger Code")
     a.add_argument("-p", "--player", help="Charaktername")
-    a.add_argument(
-        "-f", "--fight",
-        help="Fight-ID(s) '12' / '3,7,12' / '23-41', Bossname 'sszorak', "
-        "'last', 'last-kill' (Standard), 'kills', 'all'",
-    )
+    a.add_argument("-f", "--fight", help=FIGHT_HELP + " (Standard: last-kill)")
     a.add_argument("--top", type=int, default=5, help="Anzahl Top-Parses zum Vergleich (0 = aus)")
     a.add_argument("--gap", type=float, default=2.5, help="Cast-Pause ab der Downtime zählt (s)")
     a.add_argument("--md", help="Ergebnis zusätzlich als Markdown speichern (reiner Dateiname -> reports/)")
     a.set_defaults(func=cmd_analyze)
+
+    r = sub.add_parser("raid", help="Alle Spieler auswerten: wer ist woran gestorben, wer hat Mechaniken gefailt")
+    r.add_argument("report", help="Report-URL oder 16-stelliger Code")
+    r.add_argument("-p", "--player", help="Nur diese Spieler anzeigen, kommagetrennt (Vergleich bleibt der ganze Raid)")
+    r.add_argument("-f", "--fight", help=FIGHT_HELP + " (Standard: all)")
+    r.add_argument("--ignore", help="Fähigkeiten, die nie als vermeidbar zählen (kommagetrennt, Teil des Namens reicht)")
+    r.add_argument("--md", help="Ergebnis zusätzlich als Markdown speichern (reiner Dateiname -> reports/)")
+    r.set_defaults(func=cmd_raid)
 
     f = sub.add_parser("fights", help="Boss-Kämpfe eines Reports auflisten")
     f.add_argument("report")
@@ -190,6 +184,12 @@ def main(argv: list[str] | None = None) -> None:
 
     q = sub.add_parser("quota", help="Verbleibendes API-Punktebudget anzeigen")
     q.set_defaults(func=cmd_quota)
+
+    u = sub.add_parser("ui", help="Oberfläche im Browser starten")
+    u.add_argument("--host", default="127.0.0.1", help="'0.0.0.0' macht die UI im Netzwerk erreichbar (Standard: nur lokal)")
+    u.add_argument("--port", type=int, default=8080)
+    u.add_argument("--no-browser", action="store_true", help="Nur den Server starten, keinen Browser öffnen")
+    u.set_defaults(func=cmd_ui)
 
     args = ap.parse_args(argv)
     try:

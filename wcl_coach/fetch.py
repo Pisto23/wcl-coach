@@ -67,6 +67,27 @@ class PlayerFight:
         return self.fight.duration_s
 
 
+@dataclass
+class RaidFight:
+    """All players of one fight – raid mode compares them against each other."""
+
+    fight: Fight
+    report_code: str
+    players: list[Player]
+    damage_taken: dict[int, list[dict]] = field(default_factory=dict)  # player id -> table entries
+    buffs: dict[int, list[dict]] = field(default_factory=dict)
+    casts: dict[int, list[dict]] = field(default_factory=dict)
+    deaths: list[dict] = field(default_factory=list)  # every death of the fight
+    interrupts: list[dict] = field(default_factory=list)  # friendly interrupt events
+    enemy_casts: list[dict] = field(default_factory=list)  # enemy cast/begincast events of kicked spells
+    ability_names: dict[int, str] = field(default_factory=dict)
+    until: float | None = None  # ms where the tables stop – a lost wipe is cut at the collapse
+    damage_done: dict[int, dict] = field(default_factory=dict)  # player id -> DamageDone entry (total, pets)
+    healing: dict[int, dict] = field(default_factory=dict)  # player id -> Healing entry (total, overheal)
+    dispels: list[dict] = field(default_factory=list)  # dispelled auras, each with who removed how many
+    debuffs: list[dict] = field(default_factory=list)  # applydebuff/removedebuff events on friendlies
+
+
 # ----------------------------------------------------------------- utilities
 
 REPORT_RE = re.compile(r"reports/(?:a:)?([A-Za-z0-9]{16})")
@@ -98,6 +119,11 @@ def _table_data(raw: Any) -> dict:
 def _entries(raw: Any) -> list[dict]:
     d = _table_data(raw)
     return list(d.get("entries") or [])
+
+
+def _nested_entries(raw: Any) -> list[dict]:
+    """Dispels/Interrupts tables nest their entries one level deeper: entries[{entries: [...]}]."""
+    return [e for grp in _entries(raw) for e in (grp.get("entries", [grp]) if isinstance(grp, dict) else [])]
 
 
 # ------------------------------------------------------------------- queries
@@ -151,6 +177,69 @@ query($code: String!, $fid: [Int]!, $sid: Int!, $st: Float!, $et: Float!, $dt: E
         data
         nextPageTimestamp
       }
+    }
+  }
+}"""
+
+Q_EVENTS_ALL = """
+query($code: String!, $fid: [Int]!, $host: HostilityType!, $st: Float!, $et: Float!, $dt: EventDataType!) {
+  reportData {
+    report(code: $code) {
+      events(dataType: $dt, fightIDs: $fid, hostilityType: $host,
+             startTime: $st, endTime: $et, limit: 10000) {
+        data
+        nextPageTimestamp
+      }
+    }
+  }
+}"""
+
+Q_DEATHS = """
+query($code: String!, $fid: [Int]!) {
+  reportData {
+    report(code: $code) {
+      deaths: table(dataType: Deaths, fightIDs: $fid)
+    }
+  }
+}"""
+
+# filled with one aliased table per player and data type, e.g. t12: table(... sourceID: 12)
+Q_RAID_TABLES = """
+query($code: String!, $fid: [Int]!, $st: Float!, $et: Float!) {
+  reportData {
+    report(code: $code) {
+%s
+    }
+  }
+}"""
+
+# the whole raid in one go: totals per player (the ability lists in here stop after five)
+Q_RAID_TOTALS = """
+query($code: String!, $fid: [Int]!, $st: Float!, $et: Float!) {
+  reportData {
+    report(code: $code) {
+      done:    table(dataType: DamageDone, fightIDs: $fid, startTime: $st, endTime: $et)
+      healing: table(dataType: Healing,    fightIDs: $fid, startTime: $st, endTime: $et)
+      dispels: table(dataType: Dispels,    fightIDs: $fid, startTime: $st, endTime: $et)
+    }
+  }
+}"""
+
+# one player's damage and healing per ability, filled with aliased tables per pull, e.g. d27: table(...)
+Q_BREAKDOWN = """
+query($code: String!) {
+  reportData {
+    report(code: $code) {
+%s
+    }
+  }
+}"""
+
+Q_ABILITIES = """
+query($code: String!) {
+  reportData {
+    report(code: $code) {
+      masterData { abilities { gameID name } }
     }
   }
 }"""
@@ -211,14 +300,15 @@ class Fetcher:
         return _table_data(r["playerDetails"]), r.get("rDps") or {}, r.get("rHps") or {}
 
     @staticmethod
-    def resolve_player(details: dict, name: str | None, source_id: int | None) -> Player:
+    def players(details: dict) -> list[Player]:
+        """Every player of a fight, from playerDetails."""
         pd = details.get("playerDetails", details)
-        candidates: list[Player] = []
+        out: list[Player] = []
         for role_key, role in (("tanks", "tank"), ("healers", "healer"), ("dps", "dps")):
             for p in pd.get(role_key, []) or []:
                 specs = p.get("specs") or []
                 spec = specs[0].get("spec") if specs and isinstance(specs[0], dict) else None
-                candidates.append(
+                out.append(
                     Player(
                         id=p["id"],
                         name=p["name"],
@@ -228,6 +318,11 @@ class Fetcher:
                         role=role,
                     )
                 )
+        return out
+
+    @staticmethod
+    def resolve_player(details: dict, name: str | None, source_id: int | None) -> Player:
+        candidates = Fetcher.players(details)
         if source_id is not None:
             for c in candidates:
                 if c.id == source_id:
@@ -251,17 +346,25 @@ class Fetcher:
         return None, None
 
     # -- player level --------------------------------------------------------
-    def _events(self, code: str, fight: Fight, sid: int, data_type: str) -> list[dict]:
+    def _paged_events(self, gql: str, variables: dict, fight: Fight, until: float | None = None) -> list[dict]:
         out: list[dict] = []
         st = fight.start
         while st is not None:
-            ev = self.c.query(
-                Q_EVENTS,
-                {"code": code, "fid": [fight.id], "sid": sid, "st": st, "et": fight.end, "dt": data_type},
-            )["reportData"]["report"]["events"]
+            ev = self.c.query(gql, {**variables, "st": st, "et": until or fight.end})["reportData"]["report"]["events"]
             out.extend(ev.get("data") or [])
             st = ev.get("nextPageTimestamp")
         return out
+
+    def _events(self, code: str, fight: Fight, sid: int, data_type: str) -> list[dict]:
+        return self._paged_events(Q_EVENTS, {"code": code, "fid": [fight.id], "sid": sid, "dt": data_type}, fight)
+
+    def _side_events(
+        self, code: str, fight: Fight, data_type: str, hostility: str, until: float | None = None
+    ) -> list[dict]:
+        """Events of every actor on one side ("Friendlies" / "Enemies"), no source filter."""
+        return self._paged_events(
+            Q_EVENTS_ALL, {"code": code, "fid": [fight.id], "dt": data_type, "host": hostility}, fight, until
+        )
 
     def player_fight(self, code: str, fight: Fight, player: Player) -> PlayerFight:
         r = self.c.query(Q_PLAYER, {"code": code, "fid": [fight.id], "sid": player.id})["reportData"]["report"]
@@ -303,6 +406,83 @@ class Fetcher:
         }
         pf.self_buff_ids = self_ids
         return pf
+
+    # -- raid level ----------------------------------------------------------
+    def ability_names(self, code: str) -> dict[int, str]:
+        r = self.c.query(Q_ABILITIES, {"code": code})["reportData"]["report"]
+        abilities = (r.get("masterData") or {}).get("abilities") or []
+        return {a["gameID"]: a.get("name") or str(a["gameID"]) for a in abilities if "gameID" in a}
+
+    def deaths(self, code: str, fight: Fight) -> list[dict]:
+        return _entries(self.c.query(Q_DEATHS, {"code": code, "fid": [fight.id]})["reportData"]["report"]["deaths"])
+
+    def raid_fight(
+        self,
+        code: str,
+        fight: Fight,
+        players: list[Player],
+        deaths: list[dict],
+        until: float | None = None,
+        ability_names: dict[int, str] | None = None,
+        chunk: int = 5,
+    ) -> RaidFight:
+        """Damage taken, buffs, casts, debuffs and totals of every player; everything except
+        interrupts stops at `until` (ms) if given."""
+        rf = RaidFight(fight=fight, report_code=code, players=players, deaths=deaths,
+                       ability_names=ability_names or {}, until=until)
+        v = {"code": code, "fid": [fight.id], "st": fight.start, "et": until or fight.end}
+        for i in range(0, len(players), chunk):  # a few players per request keeps single queries small
+            group = players[i : i + chunk]
+            fields = "\n".join(
+                f"      {alias}{p.id}: table(dataType: {dt}, fightIDs: $fid, sourceID: {p.id}, "
+                "startTime: $st, endTime: $et)"
+                for p in group
+                for alias, dt in (("t", "DamageTaken"), ("b", "Buffs"), ("c", "Casts"))
+            )
+            r = self.c.query(Q_RAID_TABLES % fields, v)["reportData"]["report"]
+            for p in group:
+                rf.damage_taken[p.id] = _entries(r[f"t{p.id}"])
+                rf.buffs[p.id] = list(_table_data(r[f"b{p.id}"]).get("auras") or [])
+                rf.casts[p.id] = _entries(r[f"c{p.id}"])
+        totals = self.c.query(Q_RAID_TOTALS, v)["reportData"]["report"]
+        rf.damage_done = {e["id"]: e for e in _entries(totals["done"]) if "id" in e}
+        rf.healing = {e["id"]: e for e in _entries(totals["healing"]) if "id" in e}
+        rf.dispels = _nested_entries(totals["dispels"])
+        rf.debuffs = [
+            e
+            for e in self._side_events(code, fight, "Debuffs", "Friendlies", until)
+            if e.get("type") in ("applydebuff", "removedebuff")
+        ]
+        rf.interrupts = [
+            e for e in self._side_events(code, fight, "Interrupts", "Friendlies") if e.get("type") == "interrupt"
+        ]
+        if rf.interrupts:  # enemy casts are only needed to see which kickable casts went through
+            kicked = {e.get("extraAbilityGameID") for e in rf.interrupts}
+            rf.enemy_casts = [
+                e
+                for e in self._side_events(code, fight, "Casts", "Enemies")
+                if e.get("abilityGameID") in kicked and e.get("type") in ("cast", "begincast")
+            ]
+        return rf
+
+    def breakdown(
+        self, code: str, pid: int, windows: list[tuple[int, float, float]], chunk: int = 8
+    ) -> dict[int, tuple[list[dict], list[dict]]]:
+        """Damage and healing table entries per ability of one player.
+        windows: (fight ID, start ms, end ms) per pull -> {fight ID: (damage, healing)}."""
+        out: dict[int, tuple[list[dict], list[dict]]] = {}
+        for i in range(0, len(windows), chunk):  # several pulls per request
+            group = windows[i : i + chunk]
+            fields = "\n".join(
+                f"      {alias}{fid}: table(dataType: {dt}, fightIDs: [{fid}], sourceID: {pid}, "
+                f"startTime: {st:.0f}, endTime: {et:.0f})"
+                for fid, st, et in group
+                for alias, dt in (("d", "DamageDone"), ("h", "Healing"))
+            )
+            r = self.c.query(Q_BREAKDOWN % fields, {"code": code})["reportData"]["report"]
+            for fid, _, _ in group:
+                out[fid] = (_entries(r[f"d{fid}"]), _entries(r[f"h{fid}"]))
+        return out
 
     # -- benchmark -----------------------------------------------------------
     def top_players(self, me: PlayerFight, n: int = 5) -> list[PlayerFight]:
